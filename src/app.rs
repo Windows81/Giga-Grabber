@@ -123,6 +123,8 @@ pub(crate) enum Message {
     AddUrl(usize),
     // add all the urls
     AddAllUrls,
+    // upload urls from file
+    LoadUrlsFromFile,
     // backend got files for url
     GotFiles(Result<(Vec<MegaFile>, usize), usize>),
     // user added files to download queue
@@ -134,7 +136,7 @@ pub(crate) enum Message {
     // navigate to a different route
     Navigate(Route),
     // toggle file & children for download
-    ToggleFile(Box<(bool, MegaFile)>),
+    ToggleFile((bool, MegaFile)),
     // when a character is changed in the url input
     UrlInput((usize, String)),
     // toggle expanded state of file tree
@@ -279,16 +281,22 @@ impl Application for App {
             Message::AddUrlClipboard => clipboard::read(Message::GotClipboard),
             // got clipboard contents
             Message::GotClipboard(contents) => {
-                if let Some(url) = contents {
-                    if self.url_regex.is_match(&url) {
-                        // create new url input with url as value
-                        let index = self.url_input.insert(UrlInput {
-                            value: url.clone(),
-                            status: UrlStatus::None,
-                        });
+                if let Some(clip) = contents {
+                    let urls: Vec<String> = clip
+                        .split_whitespace()
+                        .map(|u| u.to_string())
+                        .filter(|u| self.url_regex.is_match(&u))
+                        .collect();
 
-                        // load the url
-                        Command::perform(async move { index }, Message::AddUrl)
+                    if !urls.is_empty() {
+                        for url in urls {
+                            // create new url input with url as value
+                            self.url_input.insert(UrlInput {
+                                value: url.clone(),
+                                status: UrlStatus::None,
+                            });
+                        }
+                        Command::none()
                     } else {
                         self.error_modal = Some("Invalid url".to_string());
                         Command::none()
@@ -336,6 +344,8 @@ impl Application for App {
                     Command::none()
                 }
             }
+            // perform AddUrl for every url input
+            Message::LoadUrlsFromFile => Command::none(),
             // perform AddUrl for every url input
             Message::AddAllUrls => {
                 let commands: Vec<_> = self
@@ -484,15 +494,15 @@ impl Application for App {
                 Command::none()
             }
             // toggle whether a file should be downloaded
-            Message::ToggleFile(item) => {
+            Message::ToggleFile((checked, file)) => {
                 // insert an entry for the file in the filter
                 self.file_filter
-                    .insert(item.1.node.hash().to_string(), item.0);
+                    .insert(file.node.hash().to_string(), checked);
 
-                // all children of the file should have the same entry in the filter
-                item.1.iter().for_each(|file| {
+                // all children of the file should be have the same entry in the filter
+                file.iter().for_each(|file| {
                     self.file_filter
-                        .insert(file.node.hash().to_string(), item.0);
+                        .insert(file.node.hash().to_string(), checked);
                 });
 
                 Command::none()
@@ -1017,6 +1027,11 @@ impl Application for App {
                                     .on_press(Message::AddInput),
                             )
                             .push(
+                                button(" Open from file ")
+                                    .style(theme::Button::Custom(Box::new(styles::button::Button)))
+                                    .on_press(Message::LoadUrlsFromFile),
+                            )
+                            .push(
                                 button(" Load all ")
                                     .style(theme::Button::Custom(Box::new(styles::button::Button)))
                                     .on_press(Message::AddAllUrls),
@@ -1321,8 +1336,8 @@ impl From<Config> for App {
             url_input: IndexMap::default(),
             expanded_files: HashMap::new(),
             route: Route::Home,
-            url_regex: Regex::new("https?://mega\\.nz/(folder|file)/([\\dA-Za-z]+)#([\\dA-Za-z-_]+)").unwrap(),
-            proxy_regex: Regex::new("(?:(?:https?|socks5h?)://)(?:(?:[a-zA-Z\\d]+(?::[a-zA-Z\\d]+)?@)?)(?:(?:[a-z\\d](?:[a-z\\d\\-]{0,61}[a-z\\d])?\\.)+[a-z\\d][a-z\\d\\-]{0,61}[a-z\\d]|(?:\\d{1,3}\\.){3}\\d{1,3})(:\\d{1,5})").unwrap(),
+            url_regex: Regex::new("https?://mega\\.nz/folder/([\\dA-Za-z]+)#([\\dA-Za-z-_]+)").unwrap(),
+            proxy_regex: Regex::new("(?:(?:https?|socks5h?)://)(?:(?:[a-z\\d]+(?::[a-z\\d]+)?@)?)(?:(?:[a-z\\d](?:[a-z\\d\\-]{0,61}[a-z\\d])?\\.)+[a-z\\d][a-z\\d\\-]{0,61}[a-z\\d]|(?:\\d{1,3}\\.){3}\\d{1,3})(:\\d{1,5})").unwrap(),
             errors: Vec::new(),
             error_modal: None,
             all_paused: false,
@@ -1347,7 +1362,7 @@ impl App {
                     checkbox(
                         "",
                         *self.file_filter.get(file.node.hash()).unwrap_or(&true),
-                        |value| Message::ToggleFile(Box::new((value, file.clone()))),
+                        |value| Message::ToggleFile((value, file.clone())),
                     )
                     .style(theme::Checkbox::Custom(Box::new(
                         styles::checkbox::Checkbox,
@@ -1383,7 +1398,7 @@ impl App {
                         checkbox(
                             "",
                             *self.file_filter.get(file.node.hash()).unwrap_or(&true),
-                            |value| Message::ToggleFile(Box::new((value, file.clone()))),
+                            |value| Message::ToggleFile((value, file.clone())),
                         )
                         .style(theme::Checkbox::Custom(Box::new(
                             styles::checkbox::Checkbox,
@@ -1839,7 +1854,7 @@ fn mega_builder(
 }
 
 // build an icon button
-fn icon_button(icon: &'static [u8], message: Message) -> Element<'static, Message> {
+fn icon_button(icon: &'static [u8], message: Message) -> Element<Message> {
     button(
         svg(svg::Handle::from_memory(icon))
             .height(Length::Fixed(25_f32))

@@ -1,0 +1,12 @@
+{
+  "theme": "System",
+  "max_threads": 1,
+  "max_threads_per_file": 1,
+  "max_concurrent_files": 1,
+  "max_retries": 10,
+  "timeout": 16227,
+  "max_retry_delay": 20835,
+  "min_retry_delay": 100,
+  "proxy_mode": "None",
+  "proxies": []
+}

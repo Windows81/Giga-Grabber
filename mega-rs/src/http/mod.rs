@@ -4,21 +4,30 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::io::AsyncRead;
+use secrecy::SecretBox;
 use url::Url;
-
-use crate::commands::{Request, Response};
-use crate::error::Error;
+use zeroize::Zeroize;
 
 #[cfg(feature = "reqwest")]
 mod reqwest;
 
+use crate::error::Result;
+use crate::protocol::commands::{Request, Response};
+use crate::utils::rsa::RsaPrivateKey;
+
 /// Stores the data representing a user's session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize)]
 pub struct UserSession {
     /// The user's session id.
     pub(crate) sid: String,
     /// The user's master key.
     pub(crate) key: [u8; 16],
+    /// The user's `sek`.
+    pub(crate) sek: [u8; 16],
+    /// The user's RSA private key (used for shares).
+    pub(crate) privk: RsaPrivateKey,
+    /// The user's handle.
+    pub(crate) user_handle: String,
 }
 
 /// Stores the data representing the client's state.
@@ -42,21 +51,21 @@ pub struct ClientState {
     /// The request counter, for idempotency.
     pub(crate) id_counter: AtomicU64,
     /// The user's session.
-    pub(crate) session: Option<UserSession>,
+    pub(crate) session: Option<SecretBox<UserSession>>,
 }
 
 #[async_trait]
-pub trait HttpClient {
+pub trait HttpClient: Send + Sync {
     /// Sends the given requests to MEGA's API and parses the responses accordingly.
     async fn send_requests(
         &self,
         state: &ClientState,
         requests: &[Request],
         query_params: &[(&str, &str)],
-    ) -> Result<Vec<Response>, Error>;
+    ) -> Result<Vec<Response>>;
 
     /// Initiates a simple GET request, returning the response body as a reader.
-    async fn get(&self, url: Url) -> Result<Pin<Box<dyn AsyncRead>>, Error>;
+    async fn get(&self, url: Url) -> Result<Pin<Box<dyn AsyncRead + Send>>>;
 
     /// Initiates a simple POST request, with body and optional `content-length`, returning the response body as a reader.
     async fn post(
@@ -64,5 +73,5 @@ pub trait HttpClient {
         url: Url,
         body: Pin<Box<dyn AsyncRead + Send + Sync>>,
         content_length: Option<u64>,
-    ) -> Result<Pin<Box<dyn AsyncRead>>, Error>;
+    ) -> Result<Pin<Box<dyn AsyncRead + Send>>>;
 }

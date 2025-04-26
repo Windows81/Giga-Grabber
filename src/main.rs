@@ -4,29 +4,35 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{stream, StreamExt};
 use futures::AsyncWriteExt;
+use futures::{stream, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use mega::{Client, Node, Nodes};
 use reqwest::{Client as HttpClient, Proxy, Url};
 use structopt::StructOpt;
-use tokio::fs::{create_dir_all, File, OpenOptions, remove_file};
+use tokio::fs::{create_dir_all, remove_file, File, OpenOptions};
 use tokio::spawn;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 #[derive(Debug, StructOpt)]
 struct Options {
-    #[structopt(short, long, default_value = "4", help = "Threads per file")]
-    threads: usize,
-
-    #[structopt(short, long, default_value = "10", help = "Number of concurrent file downloads")]
+    #[structopt(
+        short,
+        long,
+        default_value = "10",
+        help = "Number of concurrent file downloads"
+    )]
     concurrent_files: usize,
 
     #[structopt(short, long, help = "The MEGA public folder URL")]
     url: String,
 
-    #[structopt(long, default_value = "none", help = "The proxy mode [random, single, none]")]
+    #[structopt(
+        long,
+        default_value = "none",
+        help = "The proxy mode [random, single, none]"
+    )]
     proxy_mode: ProxyMode,
 
     #[structopt(long, help = "Proxy URL [socks5://user:pass@1.1.1.1:8080]")]
@@ -61,7 +67,6 @@ impl FromStr for ProxyMode {
     }
 }
 
-
 #[tokio::main]
 async fn main() {
     let options = Options::from_args();
@@ -78,62 +83,72 @@ async fn main() {
 
             let proxy_file = options.proxy_file.as_ref().unwrap();
             let proxy_str = std::fs::read_to_string(proxy_file).unwrap();
-            proxy_str.split_whitespace().map(|proxy| proxy.to_string()).collect()
+            proxy_str
+                .split_whitespace()
+                .map(|proxy| proxy.to_string())
+                .collect()
         }
         _ => Vec::new(), // empty vector for single and none modes
     };
 
     let http_client = HttpClient::builder()
-        .proxy(Proxy::custom(move |_| {
-            match options.proxy_mode {
-                ProxyMode::Random => {
-                    let i = fastrand::usize(..proxy_list.len());
-                    let proxy_url = &proxy_list[i];
-                    Url::parse(proxy_url).unwrap().into()
-                }
-                ProxyMode::Single => {
-                    Url::parse(options.proxy_url.as_ref().unwrap()).unwrap().into()
-                }
-                ProxyMode::None => None::<Url>,
+        .proxy(Proxy::custom(move |_| match options.proxy_mode {
+            ProxyMode::Random => {
+                let i = fastrand::usize(..proxy_list.len());
+                let proxy_url = &proxy_list[i];
+                Url::parse(proxy_url).unwrap().into()
             }
+            ProxyMode::Single => Url::parse(options.proxy_url.as_ref().unwrap())
+                .unwrap()
+                .into(),
+            ProxyMode::None => None::<Url>,
         }))
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     let mut mega = Client::builder()
         .https(false)
-        .timeout(Duration::from_secs(10))
+        .timeout(Some(Duration::from_secs(10)))
         .max_retry_delay(Duration::from_secs(10))
         .max_retries(20)
-        .build(http_client).unwrap();
+        .build(http_client)
+        .unwrap();
 
-    run(&mut mega, &options.url, options.concurrent_files, options.threads).await.unwrap();
+    run(&mut mega, &options.url, options.concurrent_files)
+        .await
+        .unwrap();
 }
 
-async fn run(mega: &mut Client, public_url: &str, concurrent_files: usize, threads: usize) -> mega::Result<()> {
+async fn run(mega: &mut Client, public_url: &str, concurrent_files: usize) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
-    let all_files: Vec<(Node, PathBuf)> = nodes
+    let all_files: Vec<(&Node, PathBuf)> = nodes
         .roots()
         .flat_map(|root| get_files_recursively(&nodes, root, PathBuf::new()))
         .collect();
 
-    download(mega, &all_files, concurrent_files, threads).await
+    download(mega, &all_files, concurrent_files).await
 }
 
-async fn download(mega: &mut Client, files: &Vec<(Node, PathBuf)>, concurrent_files: usize, threads: usize) -> mega::Result<()> {
+async fn download(
+    mega: &mut Client,
+    files: &Vec<(&Node, PathBuf)>,
+    concurrent_files: usize,
+) -> mega::Result<()> {
     let total_files = files.len();
-    let progress = Arc::new(
-        Mutex::new(
-            ProgressBar::new(total_files as u64)
-        )
-    );
+    let progress = Arc::new(Mutex::new(ProgressBar::new(total_files as u64)));
 
     {
         let progress = progress.lock().await;
 
-        progress.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
-            .progress_chars("#>-"));
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+        );
     }
 
     let (tx, mut rx) = mpsc::channel::<()>(16);
@@ -179,7 +194,7 @@ async fn download(mega: &mut Client, files: &Vec<(Node, PathBuf)>, concurrent_fi
                     let mut compat_file = file.compat_write(); // futures compatible file
 
                     // download the missing sections of the node and write its contents to the file
-                    mega.download_node(node, &mut compat_file, threads, &metadata_path).await?;
+                    mega.download_node(node, &mut compat_file).await?;
                     compat_file.flush().await?; // flush the file to ensure all data is written
 
                     rename(partial_path, full_path).unwrap(); // rename the file to its original name
@@ -192,7 +207,7 @@ async fn download(mega: &mut Client, files: &Vec<(Node, PathBuf)>, concurrent_fi
                 let mut compat_file = file.compat_write(); // futures compatible file
 
                 // download the node and write its contents to the file
-                mega.download_node(node, &mut compat_file, threads, &metadata_path).await?;
+                mega.download_node(node, &mut compat_file).await?;
                 compat_file.flush().await?; // flush the file to ensure all data is written
 
                 rename(partial_path, full_path).unwrap(); // rename the file to its original name
@@ -213,18 +228,22 @@ async fn download(mega: &mut Client, files: &Vec<(Node, PathBuf)>, concurrent_fi
     Ok(())
 }
 
-fn get_files_recursively(nodes: &Nodes, node: &Node, path: PathBuf) -> Vec<(Node, PathBuf)> {
+fn get_files_recursively<'a>(
+    nodes: &'a Nodes,
+    node: &Node,
+    path: PathBuf,
+) -> Vec<(&'a Node, PathBuf)> {
     let mut current_path = path.clone();
     current_path.push(node.name());
 
     node.children()
         .iter()
-        .filter_map(|hash| nodes.get_node_by_hash(hash))
+        .filter_map(|hash| nodes.get_node_by_handle(hash))
         .flat_map(|child_node| {
             if child_node.kind().is_folder() {
                 get_files_recursively(nodes, &child_node, current_path.clone())
             } else {
-                vec![(child_node.clone(), current_path.clone())]
+                vec![(child_node, current_path.clone())]
             }
         })
         .collect()
